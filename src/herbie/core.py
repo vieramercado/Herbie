@@ -253,6 +253,7 @@ class Herbie:
         # self.grib is the first existing GRIB2 file discovered.
         # self.idx is the first existing index file discovered.
         self.grib, self.grib_source = self.find_grib()
+        print(f"{self.grib=} {self.grib_source=}")
         self.idx, self.idx_source = self.find_idx()
 
         if verbose:
@@ -398,6 +399,9 @@ class Herbie:
         if verbose:
             print(f"🐜 {self.IDX_SUFFIX=}")
 
+        # Initialize variable to avoid UnboundLocalError
+        idx_exists = False
+            
         # Loop through IDX_SUFFIX options until we find one that exists
         for i in self.IDX_SUFFIX:
             if Path(url).suffix in {".grb", ".grib", ".grb2", ".grib2"}:
@@ -405,7 +409,12 @@ class Herbie:
             else:
                 idx_url = url + i
 
-            idx_exists = requests.head(idx_url).ok
+            try:
+                idx_exists = requests.head(idx_url).ok
+            except Exception as e:
+                if verbose:
+                    print(f"Unable to get index file from {idx_url} due to error {str(e)}")
+
             if verbose:
                 print(f"🐜 {idx_url=}")
                 print(f"🐜 {idx_exists=}")
@@ -465,8 +474,20 @@ class Herbie:
 
         return (None, None)
 
-    def find_idx(self) -> tuple[Optional[Union[Path, str]], Optional[str]]:
+    def find_idx(self, overwrite=False) -> tuple[Optional[Union[Path, str]], Optional[str]]:
         """Find an index file for the GRIB file."""
+
+        # But first, check if the GRIB2 inventory file exists locally if overwrite is False.
+        if not overwrite:
+            local_grib = self.get_localFilePath()
+            for suffix in self.IDX_SUFFIX:
+                print(f"{suffix=}")
+                local_idx = local_grib.with_suffix(suffix)
+                print(f"{local_idx=}")
+                if local_idx.exists() and not self.overwrite:
+                    print("Index file exists in local")
+                    return (local_idx, "local")
+
         # If priority list is set, we want to search SOURCES in that
         # priority order. If priority is None, then search all SOURCES
         # in the order given by the model template file.
@@ -479,6 +500,7 @@ class Herbie:
 
         # Ok, NOW we are ready to search for the remote GRIB2 files...
         for source in self.SOURCES:
+            print(f"Iterating on {source=}")
             if "pando" in source:
                 # Sometimes pando returns a bad handshake. Pinging
                 # pando first can help prevent that.
@@ -594,8 +616,9 @@ class Herbie:
     @functools.cached_property
     def index_as_dataframe(self) -> pd.DataFrame:
         """Read and cache the full index file."""
-        if self.grib_source == "local" and wgrib2:
+        if self.idx_source is None and self.grib_source == "local" and wgrib2:
             # Generate IDX inventory with wgrib2
+            print("Generating inventory with wgrib2 in memory")
             self.idx = StringIO(wgrib2_idx(self.get_localFilePath()))
             self.idx_source = "generated"
             self.IDX_STYLE = "wgrib2"
@@ -622,9 +645,11 @@ class Herbie:
             # Sometimes idx has more than the standard messages
             # https://noaa-nbm-grib2-pds.s3.amazonaws.com/blend.20210711/13/core/blend.t13z.core.f001.co.grib2.idx
             if self.idx_source in ["local", "generated"]:
+                print(f"{self.idx_source=}")
                 read_this_idx = self.idx
             else:
                 read_this_idx = None
+                print(f"Downloading inventory file from {self.idx=}")
                 response = requests.get(self.idx)
                 if response.status_code != 200:
                     response.raise_for_status()
@@ -637,6 +662,16 @@ class Herbie:
                     )
                 read_this_idx = StringIO(response.text)
                 response.close()
+
+                self.idx
+                print(f"{self.idx=}")
+                # TODO: Get index filename dynamically from self.idx
+                name = "tmp.inv"
+                with open(self.save_dir / name, "w") as file:
+                    print(file.name)
+                    file.write(read_this_idx.read())
+                    # reset the cursor to the beggining of the StringIO
+                    read_this_idx.seek(0)
 
             df = pd.read_csv(
                 read_this_idx,
@@ -1005,7 +1040,7 @@ class Herbie:
         if self.overwrite and self.grib_source.startswith("local"):
             # Search for the grib files on the remote archives again
             self.grib, self.grib_source = self.find_grib(overwrite=True)
-            self.idx, self.idx_source = self.find_idx()
+            self.idx, self.idx_source = self.find_idx(overwrite=True)
             print(f"Overwrite local file with file from [{self.grib_source}]")
 
         # Check that data exists
